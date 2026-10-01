@@ -169,3 +169,134 @@ async def _test_register_parcel_with_non_positive_weight() -> None:
             await transaction.rollback()
 
     await engine.dispose()
+
+
+def test_list_parcels_isolated_by_session() -> None:
+    asyncio.run(_test_list_parcels_isolated_by_session())
+
+
+async def _test_list_parcels_isolated_by_session() -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        db = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+
+        async def override_get_db_session() -> AsyncIterator[AsyncSession]:
+            yield db
+
+        app.dependency_overrides[get_db_session] = override_get_db_session
+
+        try:
+            type_id = await db.scalar(select(ParcelType.id).order_by(ParcelType.id).limit(1))
+            assert type_id is not None
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client_a:
+                response_a = await client_a.post(
+                    "/parcels",
+                    json={
+                        "name": "Session A parcel",
+                        "weight": "1.250",
+                        "type_id": type_id,
+                        "content_value_usd": "100.00",
+                    },
+                )
+                assert response_a.status_code == 201
+                parcel_a_id = response_a.json()["id"]
+
+                async with AsyncClient(
+                    transport=ASGITransport(app=app),
+                    base_url="http://test",
+                ) as client_b:
+                    response_b = await client_b.post(
+                        "/parcels",
+                        json={
+                            "name": "Session B parcel",
+                            "weight": "2.500",
+                            "type_id": type_id,
+                            "content_value_usd": "200.00",
+                        },
+                    )
+                    assert response_b.status_code == 201
+                    parcel_b_id = response_b.json()["id"]
+
+                response = await client_a.get("/parcels")
+
+            assert response.status_code == 200
+            parcel_ids = [parcel["id"] for parcel in response.json()]
+            assert parcel_ids == [parcel_a_id]
+            assert parcel_b_id not in parcel_ids
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+            await db.close()
+            await transaction.rollback()
+
+    await engine.dispose()
+
+
+def test_get_parcel_from_another_session_returns_not_found() -> None:
+    asyncio.run(_test_get_parcel_from_another_session_returns_not_found())
+
+
+async def _test_get_parcel_from_another_session_returns_not_found() -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        db = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+
+        async def override_get_db_session() -> AsyncIterator[AsyncSession]:
+            yield db
+
+        app.dependency_overrides[get_db_session] = override_get_db_session
+
+        try:
+            type_id = await db.scalar(select(ParcelType.id).order_by(ParcelType.id).limit(1))
+            assert type_id is not None
+
+            parcel_name = f"Session A private parcel {uuid4()}"
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client_a:
+                create_response = await client_a.post(
+                    "/parcels",
+                    json={
+                        "name": parcel_name,
+                        "weight": "1.250",
+                        "type_id": type_id,
+                        "content_value_usd": "100.00",
+                    },
+                )
+                assert create_response.status_code == 201
+                parcel_id = create_response.json()["id"]
+                session_a_id = client_a.cookies.get("session_id")
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client_b:
+                list_response = await client_b.get("/parcels")
+                assert list_response.status_code == 200
+                response = await client_b.get(f"/parcels/{parcel_id}")
+                session_b_id = client_b.cookies.get("session_id")
+
+            assert session_a_id is not None
+            assert session_b_id is not None
+            assert session_a_id != session_b_id
+            assert response.status_code == 404
+            assert response.json() == {"detail": f"Parcel with id {parcel_id} was not found"}
+            assert parcel_name not in response.text
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+            await db.close()
+            await transaction.rollback()
+
+    await engine.dispose()

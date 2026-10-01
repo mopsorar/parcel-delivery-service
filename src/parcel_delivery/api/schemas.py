@@ -17,3 +17,22 @@ class ParcelCreateResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: int
+
+
+class ParcelTypeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class ParcelResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    weight: Decimal
+    type_id: int
+    type_name: str
+    content_value_usd: Decimal
+    delivery_cost_rub: Decimal | None
