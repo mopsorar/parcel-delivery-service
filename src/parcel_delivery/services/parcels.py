@@ -1,12 +1,15 @@
+import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from parcel_delivery.api.schemas import ParcelCreate
 from parcel_delivery.db.models import Parcel, ParcelType
+
+logger = logging.getLogger(__name__)
 
 
 class ParcelTypeNotFoundError(Exception):
@@ -19,6 +22,12 @@ class ParcelNotFoundError(Exception):
     def __init__(self, parcel_id: int) -> None:
         self.parcel_id = parcel_id
         super().__init__(f"Parcel with id {parcel_id} was not found")
+
+
+class ParcelAlreadyAssignedError(Exception):
+    def __init__(self, parcel_id: int) -> None:
+        self.parcel_id = parcel_id
+        super().__init__(f"Parcel with id {parcel_id} is already assigned to a transport company")
 
 
 async def get_parcel_types(db: AsyncSession) -> list[ParcelType]:
@@ -43,6 +52,7 @@ async def get_parcels_by_session(
             ParcelType.name.label("type_name"),
             Parcel.content_value_usd,
             Parcel.delivery_cost_rub,
+            Parcel.transport_company_id,
         )
         .join(ParcelType, Parcel.type_id == ParcelType.id)
         .where(Parcel.session_id == session_id)
@@ -75,6 +85,7 @@ async def get_parcel_by_id(
             ParcelType.name.label("type_name"),
             Parcel.content_value_usd,
             Parcel.delivery_cost_rub,
+            Parcel.transport_company_id,
         )
         .join(ParcelType, Parcel.type_id == ParcelType.id)
         .where(
@@ -87,6 +98,42 @@ async def get_parcel_by_id(
         raise ParcelNotFoundError(parcel_id)
 
     return parcel
+
+
+async def assign_transport_company(
+    db: AsyncSession,
+    parcel_id: int,
+    session_id: UUID,
+    company_id: int,
+) -> RowMapping:
+    try:
+        result = await db.execute(
+            update(Parcel)
+            .where(
+                Parcel.id == parcel_id,
+                Parcel.session_id == session_id,
+                Parcel.transport_company_id.is_(None),
+            )
+            .values(transport_company_id=company_id)
+            .returning(Parcel.id.label("parcel_id"), Parcel.transport_company_id)
+        )
+        assignment = result.mappings().one_or_none()
+        if assignment is None:
+            # This SELECT only classifies failure; the conditional UPDATE decides ownership.
+            owned_parcel_id = await db.scalar(
+                select(Parcel.id).where(Parcel.id == parcel_id, Parcel.session_id == session_id)
+            )
+            if owned_parcel_id is None:
+                raise ParcelNotFoundError(parcel_id)
+            raise ParcelAlreadyAssignedError(parcel_id)
+
+        await db.commit()
+    except (SQLAlchemyError, ParcelNotFoundError, ParcelAlreadyAssignedError):
+        await db.rollback()
+        raise
+
+    logger.info("Transport company assigned parcel_id=%d", parcel_id)
+    return assignment
 
 
 async def get_parcel_type_by_id(session: AsyncSession, type_id: int) -> ParcelType:
@@ -118,5 +165,5 @@ async def create_parcel(
         await db.rollback()
         raise
 
-    await db.refresh(parcel)
+    logger.info("Parcel created parcel_id=%d", parcel.id)
     return parcel

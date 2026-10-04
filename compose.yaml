@@ -1,0 +1,84 @@
+x-application: &application
+  build:
+    context: .
+  image: parcel-delivery-service:local
+  environment:
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DB_NAME: ${DB_NAME:-parcel_delivery}
+    DB_USER: ${DB_USER:-parcel_delivery}
+    DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env or the environment}
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    REDIS_DB: ${REDIS_DB:-0}
+    EXCHANGE_RATE_CACHE_TTL_SECONDS: ${EXCHANGE_RATE_CACHE_TTL_SECONDS:-3600}
+    DELIVERY_COST_BATCH_SIZE: ${DELIVERY_COST_BATCH_SIZE:-100}
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_DB: ${DB_NAME:-parcel_delivery}
+      POSTGRES_USER: ${DB_USER:-parcel_delivery}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env or the environment}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    <<: *application
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *application
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

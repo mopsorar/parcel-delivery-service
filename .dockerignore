@@ -1,0 +1,19 @@
+# Only application build inputs may enter the build context.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!src/
+!src/**
+!alembic.ini
+!alembic/
+!alembic/**
+
+# Exclude local artifacts even when they are inside allowed directories.
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

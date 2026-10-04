@@ -16,7 +16,7 @@ database_url = URL.create(
     database=settings.db_name,
 )
 
-engine = create_async_engine(database_url)
+engine = create_async_engine(database_url, hide_parameters=True, isolation_level="READ COMMITTED")
 
 session_factory = async_sessionmaker(
     bind=engine,

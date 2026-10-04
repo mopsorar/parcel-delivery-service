@@ -7,6 +7,8 @@ __pycache__/
 
 # Local configuration and secrets
 .env
+.env.*
+!.env.example
 
 # Test and tool caches
 .pytest_cache/
@@ -14,6 +16,13 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+.cache/
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
 
 # IDE
 .vscode/

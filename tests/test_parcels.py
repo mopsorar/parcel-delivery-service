@@ -1,7 +1,8 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from uuid import uuid4
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,8 +13,16 @@ from parcel_delivery.db.session import engine
 from parcel_delivery.main import app
 
 
+async def dispose_engine_after(test: Awaitable[None]) -> None:
+    try:
+        await test
+    finally:
+        # Pool connections must never survive the asyncio.run() event loop that owns them.
+        await engine.dispose()
+
+
 def test_register_parcel() -> None:
-    asyncio.run(_test_register_parcel())
+    asyncio.run(dispose_engine_after(_test_register_parcel()))
 
 
 async def _test_register_parcel() -> None:
@@ -61,11 +70,9 @@ async def _test_register_parcel() -> None:
             await db.close()
             await transaction.rollback()
 
-    await engine.dispose()
-
 
 def test_register_parcel_with_unknown_type() -> None:
-    asyncio.run(_test_register_parcel_with_unknown_type())
+    asyncio.run(dispose_engine_after(_test_register_parcel_with_unknown_type()))
 
 
 async def _test_register_parcel_with_unknown_type() -> None:
@@ -120,11 +127,9 @@ async def _test_register_parcel_with_unknown_type() -> None:
             await db.close()
             await transaction.rollback()
 
-    await engine.dispose()
-
 
 def test_register_parcel_with_non_positive_weight() -> None:
-    asyncio.run(_test_register_parcel_with_non_positive_weight())
+    asyncio.run(dispose_engine_after(_test_register_parcel_with_non_positive_weight()))
 
 
 async def _test_register_parcel_with_non_positive_weight() -> None:
@@ -168,11 +173,9 @@ async def _test_register_parcel_with_non_positive_weight() -> None:
             await db.close()
             await transaction.rollback()
 
-    await engine.dispose()
-
 
 def test_list_parcels_isolated_by_session() -> None:
-    asyncio.run(_test_list_parcels_isolated_by_session())
+    asyncio.run(dispose_engine_after(_test_list_parcels_isolated_by_session()))
 
 
 async def _test_list_parcels_isolated_by_session() -> None:
@@ -236,11 +239,9 @@ async def _test_list_parcels_isolated_by_session() -> None:
             await db.close()
             await transaction.rollback()
 
-    await engine.dispose()
-
 
 def test_get_parcel_from_another_session_returns_not_found() -> None:
-    asyncio.run(_test_get_parcel_from_another_session_returns_not_found())
+    asyncio.run(dispose_engine_after(_test_get_parcel_from_another_session_returns_not_found()))
 
 
 async def _test_get_parcel_from_another_session_returns_not_found() -> None:
@@ -299,4 +300,21 @@ async def _test_get_parcel_from_another_session_returns_not_found() -> None:
             await db.close()
             await transaction.rollback()
 
-    await engine.dispose()
+
+def test_failed_assertion_does_not_leak_pool_connections_to_next_event_loop() -> None:
+    async def fail() -> None:
+        async with engine.connect() as connection:
+            await connection.scalar(select(1))
+            raise AssertionError("Simulated API assertion failure")
+
+    async def succeed() -> None:
+        async with engine.connect() as connection:
+            assert await connection.scalar(select(1)) == 1
+
+    original_pool = engine.pool
+    with pytest.raises(AssertionError, match="Simulated API assertion failure"):
+        asyncio.run(dispose_engine_after(fail()))
+    assert engine.pool is not original_pool
+    replacement_pool = engine.pool
+    asyncio.run(dispose_engine_after(succeed()))
+    assert engine.pool is not replacement_pool
